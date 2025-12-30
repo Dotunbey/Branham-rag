@@ -20,7 +20,6 @@ INDEX_NAME = "branham-index"
 SOURCE_DIRECTORY = "./sermons"
 CHUNK_FILE = "sermon_chunks.pkl"
 
-
 def process_file_adaptive(file_path, filename):
     """
     INTELLIGENT PARSER:
@@ -35,18 +34,18 @@ def process_file_adaptive(file_path, filename):
     doc.close()
 
     lines = full_text.split('\n')
-
+    
     # --- STRATEGY CHECK ---
-    # We count how many lines look like paragraph starts
-    # Regex: Start of line, number (or E-number), followed by space
-    para_pattern = re.compile(r'^\s*(E-\d+|\d+)\s+')
-
+    # UPDATED REGEX: Matches "E-1", "1", "1.", "1:" 
+    # This ensures we catch "53. Text" as well as "53 Text"
+    para_pattern = re.compile(r'^\s*(E-\d+|\d+)(?:\.|:)?\s+')
+    
     number_matches = 0
     for line in lines:
         if para_pattern.match(line):
             number_matches += 1
-
-    # Decision Threshold: If a file has fewer than 5 numbered paragraphs,
+            
+    # Decision Threshold: If a file has fewer than 5 numbered paragraphs, 
     # it's likely an unnumbered transcript.
     is_numbered_sermon = number_matches > 5
 
@@ -77,7 +76,7 @@ def process_file_adaptive(file_path, filename):
                 current_text_buffer = [line]
             else:
                 current_text_buffer.append(line)
-
+        
         # Save Tail
         if current_text_buffer:
             combined_text = " ".join(current_text_buffer)
@@ -85,26 +84,25 @@ def process_file_adaptive(file_path, filename):
                 page_content=combined_text,
                 metadata={"source": filename, "paragraph": current_para_num}
             ))
-
+            
     else:
         # --- STRATEGY B: FALLBACK CHUNKING ---
         # (For unnumbered sermons. References will say "Page X Chunk Y")
         # We assume the file is valid text, just unformatted.
-
+        
         # We create a temporary Document for the whole text
         raw_doc = Document(page_content=full_text, metadata={"source": filename})
-
+        
         # Use standard splitter
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         chunks = splitter.split_documents([raw_doc])
-
+        
         # Label them clearly
         for i, chunk in enumerate(chunks):
-            chunk.metadata["paragraph"] = f"Unnumbered (Chunk {i + 1})"
+            chunk.metadata["paragraph"] = f"Unnumbered (Chunk {i+1})"
             documents.append(chunk)
 
     return documents
-
 
 def upload_to_pinecone():
     api_key = os.getenv("PINECONE_API_KEY")
@@ -117,12 +115,13 @@ def upload_to_pinecone():
     # --- STEP 1: LOAD DATA (RESUME CAPABILITY) ---
     if os.path.exists(CHUNK_FILE):
         print(f"⚠️ Found saved data: {CHUNK_FILE}")
+        # Only ask to resume if we trust the data. Since we updated regex, suggest fresh run.
         choice = input("Skip PDF reading and RESUME upload? (y/n): ")
         if choice.lower() == 'y':
             print("📂 Loading saved chunks...")
             with open(CHUNK_FILE, "rb") as f:
                 all_docs = pickle.load(f)
-
+    
     # If we didn't load from file, process PDFs from scratch
     if not all_docs:
         # --- WIPE OLD DATA ONLY IF STARTING FRESH ---
@@ -166,35 +165,34 @@ def upload_to_pinecone():
     vector_store = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
 
     BATCH_SIZE = 50
-
+    
     # Only slice the list from the start index
     docs_to_upload = all_docs[start_index:]
-
+    
     # Initialize tqdm with the correct total and initial position
     with tqdm(total=len(docs_to_upload), desc="Uploading", initial=start_index) as pbar:
         for i in range(0, len(docs_to_upload), BATCH_SIZE):
-            batch = docs_to_upload[i: i + BATCH_SIZE]
-
+            batch = docs_to_upload[i : i + BATCH_SIZE]
+            
             # RETRY LOOP
             success = False
             retries = 3
-
+            
             while not success and retries > 0:
                 try:
                     vector_store.add_documents(batch)
                     success = True
-                    time.sleep(0.5)
+                    time.sleep(0.5) 
                     pbar.update(len(batch))
                 except Exception as e:
                     retries -= 1
                     print(f"\n⚠️ Batch failed. Retrying in 10s... ({retries} left). Error: {e}")
                     time.sleep(10)
-
+            
             if not success:
                 print(f"\n❌ FAILED to upload batch starting at index {start_index + i}. Moving to next.")
 
     print("\n✅ Success! Database is fully updated.")
-
 
 if __name__ == "__main__":
     upload_to_pinecone()
