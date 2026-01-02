@@ -1,145 +1,250 @@
 import streamlit as st
 import time
-import os
 
-# Import the backend logic from app.py
-# Make sure app.py is in the same folder!
-try:
-    from app import get_rag_chain
-except ImportError as e:
-    st.error(f"CRITICAL ERROR: Could not import app.py. Make sure the file exists and libraries are installed. Details: {e}")
-    st.stop()
-
-# --- PAGE CONFIGURATION ---
+# ==============================
+# PAGE CONFIG
+# ==============================
 st.set_page_config(
-    page_title="Voice of the Sign", 
-    page_icon="🦅", 
-    layout="centered",
-    initial_sidebar_state="collapsed"
+    page_title="Voice of the Sign",
+    page_icon="🦅",
+    layout="wide",
+    initial_sidebar_state="auto",
 )
 
-# --- CUSTOM CSS STYLING ---
+# ==============================
+# LOAD BACKEND
+# ==============================
+backend_loaded = False
+try:
+    from app import get_rag_chain, search_archives
+    backend_loaded = True
+except Exception as e:
+    st.error(f"❌ Backend failed to load:\n\n{e}")
+
+# ==============================
+# MESSAGEHUB LINK BUILDER
+# ==============================
+def messagehub_link(filename: str):
+    """
+    Example:
+    62-0909E In His Presence.pdf
+    → https://www.messagehub.info/en/read.do?ref_num=62-0909E
+    """
+    if not filename:
+        return "#"
+
+    name = filename.replace(".pdf", "").replace(".PDF", "").strip()
+    code = name.split()[0]  # first token is sermon code
+    return f"https://www.messagehub.info/en/read.do?ref_num={code}"
+
+
+# ==============================
+# STYLING
+# ==============================
 st.markdown("""
-    <style>
-    /* Chat Bubble Styling */
-    .stChatMessage { 
-        border-radius: 12px; 
-        border: 1px solid #E0E0E0; 
-        padding: 10px;
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Playfair+Display:wght@600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+
+h1, h2, h3 {
+    font-family: 'Playfair Display', serif;
+}
+
+div[data-testid="stChatMessage"][data-test-role="user"] {
+    background-color: rgba(128,128,128,0.08);
+    border-radius: 20px 20px 5px 20px;
+}
+
+div[data-testid="stChatMessage"][data-test-role="assistant"] {
+    background-color: rgba(212,175,55,0.05);
+    border-left: 4px solid #D4AF37;
+    border-radius: 20px 20px 20px 5px;
+}
+
+/* Improve markdown spacing */
+.markdown-text-container p {
+    margin-bottom: 0.9em;
+    line-height: 1.7;
+}
+
+.markdown-text-container ul {
+    margin-left: 1.2em;
+}
+
+.markdown-text-container h3 {
+    margin-top: 1.2em;
+    color: #D4AF37;
+}
+
+/* Reference cards */
+.quote-card {
+    padding: 18px;
+    margin-bottom: 14px;
+    border-radius: 12px;
+    border-left: 5px solid #D4AF37;
+}
+
+.quote-meta {
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.quote-meta a {
+    color: #D4AF37;
+    text-decoration: none;
+}
+
+.quote-text {
+    font-family: 'Playfair Display', serif;
+    font-style: italic;
+    line-height: 1.6;
+}
+
+@media (prefers-color-scheme: dark) {
+    .quote-card {
+        background-color: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.08);
     }
-    div[data-testid="stChatMessage"]:nth-child(even) { 
-        background-color: #FFFFFF; 
-        border-left: 5px solid #8B5E3C; /* Brown accent for Branham theme */
+}
+
+@media (prefers-color-scheme: light) {
+    .quote-card {
+        background: #ffffff;
+        border: 1px solid #e6e6e6;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
-    div[data-testid="stChatMessage"]:nth-child(odd) { 
-        background-color: #F8F9FA; 
-    }
-    /* Hide Streamlit Branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    </style>
+}
+
+header, #MainMenu { visibility: hidden; }
+</style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR ---
+
+# ==============================
+# SESSION STATE
+# ==============================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+
+# ==============================
+# SIDEBAR
+# ==============================
 with st.sidebar:
-    st.title("🦅 Voice of the Sign")
-    st.info("This AI allows you to search the Message using Hybrid Technology (Vector + Keywords).")
+    st.title("🦅 Controls")
+    mode = st.radio("Mode", ["🗣️ Chat", "🔍 Search"], index=0, label_visibility="collapsed")
     st.divider()
-    if st.button("Clear Chat History", use_container_width=True):
-        st.session_state.messages = []
+
+    if st.button("🗑️ Clear Screen", use_container_width=True):
+        st.session_state.chat_history = []
         st.rerun()
 
-# --- INITIALIZE CHAT HISTORY ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "God bless you. I am here to search the tapes for you. What is on your heart?"}
-    ]
 
-# --- LOAD THE BRAIN (With Spinner) ---
-# We use cache_resource so it only connects to Pinecone once
+# ==============================
+# HEADER
+# ==============================
+col1, col2 = st.columns([1, 14])
+with col1:
+    st.markdown("# 🦅")
+with col2:
+    st.markdown("# The 7th Handle" if mode.startswith("🗣️") else "# The Table")
+
+st.divider()
+
+if not backend_loaded:
+    st.stop()
+
+
+# ==============================
+# LOAD RAG SYSTEM
+# ==============================
 @st.cache_resource(show_spinner=False)
 def load_chain():
     return get_rag_chain()
 
-# Placeholder for the loading state
-if "chain" not in st.session_state:
-    with st.spinner("Connecting to Pinecone & Unzipping Keyword Data... (This takes 10s)"):
-        try:
-            st.session_state.chain = load_chain()
-        except Exception as e:
-            st.error(f"Failed to load system: {e}")
-            st.stop()
 
-chain = st.session_state.chain
+# =========================================================
+# CHAT MODE
+# =========================================================
+if mode.startswith("🗣️"):
 
-# --- DISPLAY CHAT HISTORY ---
-st.title("🦅 THE 7TH HANDLE")
-st.caption("Interactive Archive • Powered by Gemini & Pinecone")
-st.divider()
+    # --- Render chat history ---
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🦅"):
+            st.markdown(msg["content"], unsafe_allow_html=False)
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"], avatar="📖" if msg["role"] == "assistant" else "👤"):
-        st.markdown(msg["content"])
-        
-        # Display Sources if available
-        if "sources" in msg and msg["sources"]:
-            with st.expander("📚 Sermon References"):
-                for src in msg["sources"]:
-                    st.markdown(f"- *{src}*")
+            if msg.get("sources"):
+                with st.expander("📚 References"):
+                    for doc in msg["sources"]:
+                        src = doc.metadata.get("source", "")
+                        para = doc.metadata.get("paragraph", "")
+                        link = messagehub_link(src)
+                        st.markdown(f"🔗 [{src} (Para {para})]({link})")
 
-# --- USER INPUT HANDLING ---
-if prompt := st.chat_input("Ask a question (e.g., 'What is the Third Pull?')..."):
-    
-    # 1. Add User Message to History
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
+    # --- Input ---
+    prompt = st.chat_input("Ask a question...")
 
-    # 2. Generate Assistant Response
-    with st.chat_message("assistant", avatar="📖"):
-        with st.spinner("Searching the archives..."):
-            try:
-                # Run the RAG Chain
-                response = chain.invoke({"query": prompt})
-                result_text = response['result']
-                
-                # --- EXTRACT REFERENCES ---
-                source_docs = response.get('source_documents', [])
-                formatted_sources = []
-                
-                for doc in source_docs:
-                    # Get metadata
-                    filename = doc.metadata.get('source', 'Unknown Sermon')
-                    paragraph = doc.metadata.get('paragraph', 'Intro')
-                    
-                    # Format: "65-1127.pdf (Para E-5)"
-                    formatted_sources.append(f"{filename} (Para {paragraph})")
-                
-                # Remove duplicates while keeping order
-                unique_sources = list(dict.fromkeys(formatted_sources))
+    if prompt:
+        # Save user message
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": prompt
+        })
 
-                # --- TYPING EFFECT ---
-                placeholder = st.empty()
-                full_response = ""
-                # Simulate typing
-                for chunk in result_text.split():
-                    full_response += chunk + " "
-                    time.sleep(0.04)
-                    placeholder.markdown(full_response + "▌")
-                placeholder.markdown(full_response)
+        with st.spinner("Searching the tapes..."):
+            chain = load_chain()
+            response = chain.invoke({"question": prompt})
 
-                # --- SAVE TO HISTORY ---
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": full_response,
-                    "sources": unique_sources
-                })
-                
-                # --- SHOW SOURCES IMMEDIATELY ---
-                if unique_sources:
-                    with st.expander("📚 Sermon References"):
-                        for src in unique_sources:
-                            st.markdown(f"- *{src}*")
+        answer_text = response.get("result", "")
+        sources = response.get("source_documents", [])
 
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
+        # Save assistant message (FULLY formed)
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": answer_text,
+            "sources": sources
+        })
+
+        # Force rerender so references appear immediately
+        st.rerun()
+
+
+# =========================================================
+# SEARCH MODE
+# =========================================================
+else:
+    query = st.chat_input("Search for a keyword...")
+
+    if query:
+        st.subheader(f"Results for: “{query}”")
+
+        with st.spinner("Scanning archives..."):
+            docs, debug_log = search_archives(query)
+
+        with st.expander("🛠 Debug Info"):
+            for line in debug_log:
+                st.write(line)
+
+        if not docs:
+            st.info("No exact records found.")
+        else:
+            for doc in docs:
+                src = doc.metadata.get("source", "")
+                para = doc.metadata.get("paragraph", "")
+                link = messagehub_link(src)
+
+                st.markdown(f"""
+                <div class="quote-card">
+                    <div class="quote-meta">
+                        <a href="{link}" target="_blank">
+                            📼 {src} (Para {para})
+                        </a>
+                    </div>
+                    <div class="quote-text">
+                        "{doc.page_content}"
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
