@@ -1,198 +1,270 @@
 import os
-import re
 import pickle
-import time
-import fitz  # PyMuPDF
+from typing import List, Dict, Set
 from dotenv import load_dotenv
-from tqdm import tqdm
 
-# Imports
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pinecone import Pinecone  # Needed for deletion
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain_community.retrievers import BM25Retriever
+from langchain.chains import RetrievalQA
+from langchain_core.prompts import PromptTemplate
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 
 load_dotenv()
 
-# --- CONFIG ---
+# ===============================
+# CONFIG
+# ===============================
 INDEX_NAME = "branham-index"
-SOURCE_DIRECTORY = "./sermons"
-CHUNK_FILE = "sermon_chunks.pkl"
+CHUNKS_FILE = "sermon_chunks.pkl"
 
-def process_file_adaptive(file_path, filename):
+# ===============================
+# CANONICAL SERIES
+# ===============================
+SEVEN_SEALS_CANON = [
+    "63-0317e the breach between the church ages and the seven seals",
+    "63-0317m god hiding himself in simplicity, then revealing himself in the same",
+    "63-0318 the first seal",
+    "63-0319 the second seal",
+    "63-0320 the third seal",
+    "63-0321 the fourth seal",
+    "63-0322 the fifth seal",
+    "63-0323 the sixth seal",
+    "63-0324e the seventh seal",
+    "63-0324m questions and answers on the seals",
+]
+
+SERIES_GROUPS = {
+    "seven seals": SEVEN_SEALS_CANON,
+}
+
+# ===============================
+# HELPERS
+# ===============================
+def normalize(text: str) -> str:
+    return text.lower().replace("_", " ").replace("-", " ").strip()
+
+
+def load_chunks() -> List[Document]:
+    if not os.path.exists(CHUNKS_FILE):
+        return []
+    with open(CHUNKS_FILE, "rb") as f:
+        return pickle.load(f)
+
+
+def extract_date_code(filename: str) -> str:
     """
-    INTELLIGENT PARSER:
-    1. Scans text to see if it has paragraph numbers (E-1 or 1, 2, 3).
-    2. If YES: Uses strict paragraph splitting.
-    3. If NO: Falls back to standard character chunking (so no text is lost).
+    Assumes filenames start with NN-NNNNE
+    Example: 62-0909E In His Presence.pdf
     """
-    doc = fitz.open(file_path)
-    full_text = ""
-    for page in doc:
-        full_text += page.get_text() + "\n"
-    doc.close()
+    return filename.split()[0].replace(".pdf", "")
 
-    lines = full_text.split('\n')
-    
-    # --- STRATEGY CHECK ---
-    # UPDATED REGEX: Matches "E-1", "1", "1.", "1:" 
-    # This ensures we catch "53. Text" as well as "53 Text"
-    para_pattern = re.compile(r'^\s*(E-\d+|\d+)(?:\.|:)?\s+')
-    
-    number_matches = 0
-    for line in lines:
-        if para_pattern.match(line):
-            number_matches += 1
-            
-    # Decision Threshold: If a file has fewer than 5 numbered paragraphs, 
-    # it's likely an unnumbered transcript.
-    is_numbered_sermon = number_matches > 5
 
-    documents = []
+def messagehub_link(filename: str) -> str:
+    code = extract_date_code(filename)
+    return f"https://www.messagehub.info/en/read.do?ref_num={code}"
 
-    if is_numbered_sermon:
-        # --- STRATEGY A: PARAGRAPH SPLITTING ---
-        # (This gives exact references like "Para 53")
-        current_para_num = "Intro"
-        current_text_buffer = []
 
-        for line in lines:
-            line = line.strip()
-            if not line: continue
+# ===============================
+# RETRIEVER
+# ===============================
+class BranhamRetriever(BaseRetriever):
+    """
+    NotebookLM-style hybrid retriever:
+    - local priority
+    - semantic fallback
+    - series-aware
+    - safe + deduplicated
+    """
 
-            match = para_pattern.match(line)
-            if match:
-                # Save Previous
-                if current_text_buffer:
-                    combined_text = " ".join(current_text_buffer)
-                    if len(combined_text) > 20:
-                        documents.append(Document(
-                            page_content=combined_text,
-                            metadata={"source": filename, "paragraph": current_para_num}
-                        ))
-                # Start New
-                current_para_num = match.group(1)
-                current_text_buffer = [line]
-            else:
-                current_text_buffer.append(line)
-        
-        # Save Tail
-        if current_text_buffer:
-            combined_text = " ".join(current_text_buffer)
-            documents.append(Document(
-                page_content=combined_text,
-                metadata={"source": filename, "paragraph": current_para_num}
-            ))
-            
-    else:
-        # --- STRATEGY B: FALLBACK CHUNKING ---
-        # (For unnumbered sermons. References will say "Page X Chunk Y")
-        # We assume the file is valid text, just unformatted.
-        
-        # We create a temporary Document for the whole text
-        raw_doc = Document(page_content=full_text, metadata={"source": filename})
-        
-        # Use standard splitter
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        chunks = splitter.split_documents([raw_doc])
-        
-        # Label them clearly
-        for i, chunk in enumerate(chunks):
-            chunk.metadata["paragraph"] = f"Unnumbered (Chunk {i+1})"
-            documents.append(chunk)
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun = None
+    ) -> List[Document]:
 
-    return documents
+        query_clean = normalize(query)
+        chunks = load_chunks()
+        results: List[Document] = []
+        seen = set()
 
-def upload_to_pinecone():
-    api_key = os.getenv("PINECONE_API_KEY")
-    if not api_key or not os.getenv("GOOGLE_API_KEY"):
-        print("❌ Error: Missing Keys.")
-        return
+        # -------------------------------------------------
+        # Detect sermon reference (date code)
+        # -------------------------------------------------
+        explicit_sermon = None
+        for token in query.split():
+            if "-" in token and len(token) >= 7:
+                explicit_sermon = token.upper()
+                break
 
-    all_docs = []
+        # -------------------------------------------------
+        # Detect series
+        # -------------------------------------------------
+        target_titles = []
+        is_series = False
 
-    # --- STEP 1: LOAD DATA (RESUME CAPABILITY) ---
-    if os.path.exists(CHUNK_FILE):
-        print(f"⚠️ Found saved data: {CHUNK_FILE}")
-        # Only ask to resume if we trust the data. Since we updated regex, suggest fresh run.
-        choice = input("Skip PDF reading and RESUME upload? (y/n): ")
-        if choice.lower() == 'y':
-            print("📂 Loading saved chunks...")
-            with open(CHUNK_FILE, "rb") as f:
-                all_docs = pickle.load(f)
-    
-    # If we didn't load from file, process PDFs from scratch
-    if not all_docs:
-        # --- WIPE OLD DATA ONLY IF STARTING FRESH ---
-        print("🧹 Cleaning old data from Pinecone...")
-        pc = Pinecone(api_key=api_key)
-        index = pc.Index(INDEX_NAME)
+        for key, titles in SERIES_GROUPS.items():
+            if key in query_clean:
+                target_titles = titles
+                is_series = True
+                break
+
+        # -------------------------------------------------
+        # SERMON-TARGETED SEARCH
+        # -------------------------------------------------
+        if explicit_sermon:
+            for d in chunks:
+                src = normalize(d.metadata.get("source", ""))
+                if explicit_sermon.lower() in src:
+                    key = d.page_content[:120]
+                    if key not in seen:
+                        results.append(d)
+                        seen.add(key)
+
+        # -------------------------------------------------
+        # SERIES SEARCH
+        # -------------------------------------------------
+        elif target_titles:
+            for d in chunks:
+                src = normalize(d.metadata.get("source", ""))
+                if any(t in src for t in target_titles):
+                    key = d.page_content[:120]
+                    if key not in seen:
+                        results.append(d)
+                        seen.add(key)
+
+        # -------------------------------------------------
+        # KEYWORD SEARCH (LOCAL)
+        # -------------------------------------------------
+        if len(results) < 25:
+            bm25 = BM25Retriever.from_documents(chunks)
+            bm25.k = 60
+            for d in bm25.invoke(query):
+                key = d.page_content[:120]
+                if key not in seen:
+                    results.append(d)
+                    seen.add(key)
+
+        # -------------------------------------------------
+        # VECTOR SEARCH (PINECONE)
+        # -------------------------------------------------
         try:
-            index.delete(delete_all=True)
-            print("✅ Index wiped clean.")
-        except Exception as e:
-            print(f"⚠️ Could not wipe index: {e}")
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/text-embedding-004"
+            )
+            store = PineconeVectorStore(
+                index_name=INDEX_NAME,
+                embedding=embeddings
+            )
 
-        # Process Files
-        files = [f for f in os.listdir(SOURCE_DIRECTORY) if f.lower().endswith('.pdf')]
-        print(f"📂 Found {len(files)} PDFs. Starting Adaptive Ingestion...")
+            vec_docs = store.as_retriever(search_kwargs={"k": 30}).invoke(query)
+            for d in vec_docs:
+                key = d.page_content[:120]
+                if key not in seen:
+                    results.append(d)
+                    seen.add(key)
 
-        for filename in tqdm(files, desc="Processing"):
-            file_path = os.path.join(SOURCE_DIRECTORY, filename)
-            try:
-                docs = process_file_adaptive(file_path, filename)
-                all_docs.extend(docs)
-            except Exception as e:
-                print(f"Error reading {filename}: {e}")
+        except Exception:
+            pass
 
-        # Save Local Keywords
-        print("💾 Saving local chunks...")
-        with open(CHUNK_FILE, "wb") as f:
-            pickle.dump(all_docs, f)
+        return results
 
-    print(f"🔹 Ready to upload {len(all_docs)} total chunks.")
 
-    # --- STEP 2: DETERMINE START POINT ---
-    start_index = 0
-    start_input = input("Enter start index (e.g., 0 to start fresh, 84000 to resume): ")
-    if start_input.isdigit():
-        start_index = int(start_input)
+# ===============================
+# PROMPT
+# ===============================
+PROMPT_TEMPLATE = """
+You are William Marrion Branham, speaking carefully as a teacher and evangelist.
 
-    # --- STEP 3: UPLOAD WITH RETRY LOGIC ---
-    print(f"🚀 Uploading to Pinecone starting at {start_index}...")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    vector_store = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+RULES:
+- Speak only from the provided sermons.
+- Do NOT invent doctrine.
+- If something is not clearly stated, say so.
+- Use a calm 1950s teaching tone.
+- Structure answers with headings and bullet points.
+- Explain symbols carefully.
+- Prefer paraphrase, but preserve meaning.
+- Do NOT quote paragraph numbers.
+- Do NOT fabricate citations.
+- If a question asks for a sermon summary, summarize only that sermon.
+- If the question references the Seven Seals, prioritize the 1963 series.
 
-    BATCH_SIZE = 50
-    
-    # Only slice the list from the start index
-    docs_to_upload = all_docs[start_index:]
-    
-    # Initialize tqdm with the correct total and initial position
-    with tqdm(total=len(docs_to_upload), desc="Uploading", initial=start_index) as pbar:
-        for i in range(0, len(docs_to_upload), BATCH_SIZE):
-            batch = docs_to_upload[i : i + BATCH_SIZE]
-            
-            # RETRY LOOP
-            success = False
-            retries = 3
-            
-            while not success and retries > 0:
-                try:
-                    vector_store.add_documents(batch)
-                    success = True
-                    time.sleep(0.5) 
-                    pbar.update(len(batch))
-                except Exception as e:
-                    retries -= 1
-                    print(f"\n⚠️ Batch failed. Retrying in 10s... ({retries} left). Error: {e}")
-                    time.sleep(10)
-            
-            if not success:
-                print(f"\n❌ FAILED to upload batch starting at index {start_index + i}. Moving to next.")
+CONTEXT:
+{context_str}
 
-    print("\n✅ Success! Database is fully updated.")
+QUESTION:
+{question}
 
-if __name__ == "__main__":
-    upload_to_pinecone()
+ANSWER:
+"""
+
+PROMPT = PromptTemplate(
+    template=PROMPT_TEMPLATE,
+    input_variables=["context_str", "question"],
+)
+
+# ===============================
+# PUBLIC API
+# ===============================
+def get_rag_chain():
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.25,
+        convert_system_message_to_human=True,
+    )
+
+    retriever = BranhamRetriever()
+
+    chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        chain_type="stuff",
+        return_source_documents=True,
+        chain_type_kwargs={
+            "prompt": PROMPT,
+            "document_variable_name": "context_str",
+        },
+        input_key="question",
+    )
+
+    return chain
+
+
+def search_archives(query: str):
+    """
+    Used by Search mode only.
+    Returns (documents, debug_log)
+    """
+    debug = []
+    docs = []
+    seen = set()
+
+    chunks = load_chunks()
+    query_clean = normalize(query)
+
+    # Keyword search
+    for d in chunks:
+        if query_clean in d.page_content.lower():
+            key = d.page_content[:120]
+            if key not in seen:
+                docs.append(d)
+                seen.add(key)
+
+    debug.append(f"Keyword hits: {len(docs)}")
+
+    # Fallback BM25
+    if len(docs) < 20:
+        bm25 = BM25Retriever.from_documents(chunks)
+        bm25.k = 50
+        for d in bm25.invoke(query):
+            key = d.page_content[:120]
+            if key not in seen:
+                docs.append(d)
+                seen.add(key)
+
+    debug.append(f"Total results: {len(docs)}")
+
+    return docs, debug
