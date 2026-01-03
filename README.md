@@ -1,6 +1,6 @@
-# William Branham RAG Chatbot
+# Branham RAG Chatbot
 
-An AI simulation that impersonates William Branham using a local library of sermon PDFs. It uses Hybrid Retrieval (Semantic + Keyword) and Google Gemini to generate responses strictly grounded in the text.
+An AI simulation that serves as an assistant to William Branham using a local library of sermon PDFs. It uses Hybrid Retrieval (Semantic + Keyword) and Google Gemini to generate responses strictly grounded in the text.
 
 ## Prerequisites
 
