@@ -6,6 +6,7 @@ An AI simulation that serves as an assistant to William Branham using a local li
 
 1.  **Python 3.9+** installed.
 2.  **Google API Key** (Get it from [Google AI Studio](https://aistudio.google.com/)).
+3.  pinecone API key
 
 ## Setup
 
