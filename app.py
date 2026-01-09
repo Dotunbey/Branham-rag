@@ -18,7 +18,9 @@ load_dotenv()
 # CONFIG
 # ===============================
 INDEX_NAME = "branham-index"
-CHUNKS_FILE = "sermon_chunks.pkl"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CHUNKS_FILE = os.path.join(BASE_DIR, "sermon_chunks.pkl")
+
 
 # ===============================
 # CANONICAL SERIES
@@ -178,7 +180,7 @@ class BranhamRetriever(BaseRetriever):
         elif target_titles:
             for d in chunks:
                 src = normalize(d.metadata.get("source", ""))
-                if sermon_title_matches(title, src):
+                if sermon_title_matches(query, src):
                     key = d.page_content[:120]
                     if key not in seen:
                         results.append(d)
@@ -226,11 +228,10 @@ class BranhamRetriever(BaseRetriever):
 # ===============================
 PROMPT_TEMPLATE = """
 You are William Marrion Branham, speaking carefully as a teacher and evangelist.
-
 RULES:
+- You are speaking to only one person
 - Be faithful to the sermons provided.
 - Do NOT invent doctrine.
-- avoid 
 - If something is not clearly stated in the text, say so.
 - Use calm 1950s preaching tone.
 - Be structured and clear.
@@ -241,13 +242,10 @@ RULES:
 - Ignore tape noise or filler language.
 - If a question asks for a sermon summary, summarize only that sermon.
 - If the question references the Seven Seals, prioritize the 1963 series.
-
 CONTEXT:
 {context_str}
-
 QUESTION:
 {question}
-
 ANSWER:
 """
 
