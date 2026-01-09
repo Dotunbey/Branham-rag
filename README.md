@@ -1,4 +1,4 @@
-# 🦅 Voice of the Sign
+# 🦅 Branham-RAG
 
 **A NotebookLM‑Grade Retrieval‑Augmented AI for Large Sermon Archives**
 
@@ -6,7 +6,7 @@
 
 ## 📌 Overview
 
-**Voice of the Sign** is a production‑ready **Retrieval‑Augmented Generation (RAG)** system designed to deliver **accurate, reference‑grounded answers and summaries** over a large historical sermon corpus.
+**Branham-RAG** is a production‑ready **Retrieval‑Augmented Generation (RAG)** system designed to deliver **accurate, reference‑grounded answers and summaries** over a large historical sermon corpus.
 
 Unlike typical chatbot demos, this system emphasizes:
 
