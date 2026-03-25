@@ -6,7 +6,7 @@ FOLDER = r"./sermons"   # change this to your folder path
 
 
 
-mapping2 = {
+mapping = {
     "47-0412": "Faith Is The Substance",
     "47-1100X": "Fellowship",
     "47-1102": "The Angel Of God",
@@ -1112,10 +1112,7 @@ mapping2 = {
     "64-0208": "The Token",
     "64-0209": "Countdown",
     "64-0212": "When Their Eyes Were Opened, They Knew Him",
-    "64-0213": "Then Jesus Came And Called"
-}
-
-mapping = {
+    "64-0213": "Then Jesus Came And Called",
     "64-0214": "The Voice Of The Sign",
     "64-0215": "Influences",
     "64-0216": "Identification",
