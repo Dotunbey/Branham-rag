@@ -801,10 +801,7 @@ mapping = {
     "60-1211M": "The Ten Virgins, And The Hundred And Forty-Four Thousand Jews",
     "60-1218": "The Uncertain Sound",
     "60-1225": "God's Wrapped Gift",
-    "60-1231": "Revelation, Chapter Four #1"
-}
-
-mapping2 = {
+    "60-1231": "Revelation, Chapter Four #1",
     "61-0101": "Revelation, Chapter Four #2",
     "61-0108": "Revelation, Chapter Four #3",
     "61-0112": "Questions And Answers",
