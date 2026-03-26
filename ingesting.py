@@ -37,17 +37,17 @@ def ensure_data_ready():
     """Ensures the pickle file exists, unzipping it if necessary."""
     if not os.path.exists(CHUNK_FILE):
         if os.path.exists(ZIP_FILE):
-            logger.info(f"📦 Unzipping {ZIP_FILE}...")
+            logger.info(f" Unzipping {ZIP_FILE}...")
             with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
                 zip_ref.extractall(".")
-            logger.info("✅ Unzip complete.")
+            logger.info(" Unzip complete.")
         else:
             raise FileNotFoundError(f"Missing {CHUNK_FILE} and {ZIP_FILE}. Please upload data.")
 
 def load_chunks_from_disk() -> List[Document]:
     """Loads the parsed documents into memory."""
     ensure_data_ready()
-    logger.info(f"📂 Loading {CHUNK_FILE} into memory...")
+    logger.info(f" Loading {CHUNK_FILE} into memory...")
     with open(CHUNK_FILE, "rb") as f:
         docs = pickle.load(f)
     logger.info(f"🔹 Loaded {len(docs)} raw chunks.")
@@ -96,13 +96,10 @@ def run_pipeline():
 
     # 1. Setup Pinecone Client
     pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-    
-    # SENIOR NOTE: Avoid `index.delete(delete_all=True)` in production. 
-    # It causes downtime for your app. Instead, upload to a new Namespace!
+ 
     logger.info("Connecting to Vector Store...")
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-    
-    # Optionally add namespace="v2" here to avoid downtime
+     
     vector_store = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
 
     # 2. Get Data
@@ -112,33 +109,31 @@ def run_pipeline():
     dlq_failed_batches = []
     
     # 4. Execute Upload Stream
-    logger.info("🚀 Starting Upload Pipeline...")
+    logger.info(" Starting Upload Pipeline...")
     
     with tqdm(total=len(all_docs), desc="Uploading") as pbar:
         # We use our generator to stream batches rather than holding massive sub-lists
         for raw_batch in batch_generator(all_docs, BATCH_SIZE):
             
-            # Step A: Transform
             safe_batch = apply_monster_check(raw_batch)
             
-            # Step B: Load
             try:
                 upload_batch_to_pinecone(vector_store, safe_batch)
                 pbar.update(len(raw_batch))
                 
             except Exception as e:
-                # Step C: Catch unrecoverable failures (DLQ)
-                logger.error(f"❌ Batch permanently failed after retries: {e}")
+                # Catch unrecoverable failures (DLQ)
+                logger.error(f" Batch permanently failed after retries: {e}")
                 dlq_failed_batches.extend(safe_batch)
                 
     # 5. Pipeline Teardown & Reporting
     if dlq_failed_batches:
-        logger.warning(f"⚠️ Saving {len(dlq_failed_batches)} failed chunks to DLQ: {DLQ_FILE}")
+        logger.warning(f" Saving {len(dlq_failed_batches)} failed chunks to DLQ: {DLQ_FILE}")
         with open(DLQ_FILE, "wb") as f:
             pickle.dump(dlq_failed_batches, f)
         logger.info("To retry failures later, write a script to load the DLQ file and upload.")
     else:
-        logger.info("✅ SUCCESS! 100% of chunks ingested safely.")
+        logger.info("SUCCESS! 100% of chunks ingested safely.")
 
 if __name__ == "__main__":
     run_pipeline()
